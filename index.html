@@ -928,6 +928,21 @@
             return parseFloat((bps / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
+        function formatCount(num) {
+            if (num === 0) return '0';
+            if (num < 1000) return num.toString();
+            if (num < 10000) return (num / 1000).toFixed(2) + ' 千';
+            if (num < 100000000) return (num / 10000).toFixed(2) + ' 万';
+            return (num / 100000000).toFixed(2) + ' 亿';
+        }
+
+        function getBestCountUnit(maxValue) {
+            if (maxValue < 1000) return { unit: '次', divisor: 1 };
+            if (maxValue < 10000) return { unit: '千次', divisor: 1000 };
+            if (maxValue < 100000000) return { unit: '万次', divisor: 10000 };
+            return { unit: '亿次', divisor: 100000000 };
+        }
+
         async function initDashboard() {
             // Initialize charts
             chartTraffic = echarts.init(document.getElementById('chart_traffic'));
@@ -1066,7 +1081,7 @@
                     return res;
                 }},
                 legend: { data: metrics.map(m => metricLabels[m]), bottom: 0 },
-                grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
                 xAxis: { type: 'category', boundaryGap: false, data: timeData },
                 yAxis: { type: 'value', name: unit },
                 series: series
@@ -1128,7 +1143,7 @@
                     return res;
                 }},
                 legend: { data: metrics.map(m => metricLabels[m]), bottom: 0 },
-                grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
                 xAxis: { type: 'category', boundaryGap: false, data: timeData },
                 yAxis: { type: 'value', name: unit },
                 series: series
@@ -1141,30 +1156,59 @@
             const series = [];
             let timeData = [];
 
+            // Calculate global max
+            let globalMax = 0;
+            metrics.forEach(metric => {
+                const data = results[metric];
+                if (data && data.type === 'time') {
+                    const max = Math.max(...data.valueData);
+                    if (max > globalMax) globalMax = max;
+                }
+            });
+
+            const { unit, divisor } = getBestCountUnit(globalMax);
+
             metrics.forEach(metric => {
                 const data = results[metric];
                 if (!data || data.type !== 'time') return;
                 
                 // Update KPI
-                document.getElementById(`kpi_${metric}`).innerText = data.sum.toLocaleString();
+                document.getElementById(`kpi_${metric}`).innerText = formatCount(data.sum);
 
                 if (timeData.length === 0) timeData = data.timeData;
+
+                // Chart Data (Dynamic Unit)
+                const valueData = data.valueData.map(v => {
+                    const val = v / divisor;
+                    return (divisor === 1) ? val : val.toFixed(2);
+                });
 
                 series.push({
                     name: metricLabels[metric],
                     type: 'line',
                     smooth: true,
-                    data: data.valueData,
+                    data: valueData,
                     itemStyle: { color: metricColors[metric] },
-                    areaStyle: { opacity: 0.2 }
+                    areaStyle: { opacity: 0.2 },
+                    rawData: data.valueData
                 });
             });
 
             const option = {
-                tooltip: { trigger: 'axis' },
-                grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+                tooltip: { trigger: 'axis', formatter: (params) => {
+                    let res = params[0].axisValue + '<br/>';
+                    params.forEach(param => {
+                        const seriesIndex = param.seriesIndex;
+                        const dataIndex = param.dataIndex;
+                        const rawVal = series[seriesIndex].rawData[dataIndex];
+                        const formattedVal = formatCount(rawVal);
+                        res += `${param.marker}${param.seriesName}: ${formattedVal}<br/>`;
+                    });
+                    return res;
+                }},
+                grid: { left: '3%', right: '4%', bottom: '3%', top: '15%', containLabel: true },
                 xAxis: { type: 'category', boundaryGap: false, data: timeData },
-                yAxis: { type: 'value' },
+                yAxis: { type: 'value', name: unit },
                 series: series
             };
             chartRequests.setOption(option);
@@ -1175,9 +1219,10 @@
             const series = [];
             let timeData = [];
 
-            // Calculate global max for Flux and Bandwidth separately
+            // Calculate global max for Flux, Bandwidth and Requests separately
             let maxFlux = 0;
             let maxBandwidth = 0;
+            let maxRequests = 0;
 
             metrics.forEach(metric => {
                 const data = results[metric];
@@ -1187,12 +1232,15 @@
                         if (max > maxFlux) maxFlux = max;
                     } else if (metric.includes('Bandwidth')) {
                         if (max > maxBandwidth) maxBandwidth = max;
+                    } else if (metric.includes('request')) {
+                        if (max > maxRequests) maxRequests = max;
                     }
                 }
             });
 
             const fluxUnit = getBestUnit(maxFlux, 'bytes');
             const bandwidthUnit = getBestUnit(maxBandwidth, 'bandwidth');
+            const requestUnit = getBestCountUnit(maxRequests);
 
             metrics.forEach(metric => {
                 const data = results[metric];
@@ -1205,6 +1253,8 @@
                          kpiEl.innerText = formatBytes(data.sum);
                     } else if (metric.includes('Bandwidth')) {
                          kpiEl.innerText = formatBps(data.max);
+                    } else if (metric.includes('request')) {
+                         kpiEl.innerText = formatCount(data.sum);
                     } else {
                          kpiEl.innerText = data.sum.toLocaleString();
                     }
@@ -1223,12 +1273,18 @@
                 } else if (metric.includes('Bandwidth')) {
                     unit = bandwidthUnit.unit;
                     divisor = bandwidthUnit.divisor;
+                } else if (metric.includes('request')) {
+                    unit = requestUnit.unit;
+                    divisor = requestUnit.divisor;
                 } else {
                     unit = '';
                     divisor = 1;
                 }
 
-                chartData = data.valueData.map(v => (v / divisor).toFixed(2));
+                chartData = data.valueData.map(v => {
+                    const val = v / divisor;
+                    return (divisor === 1) ? val : val.toFixed(2);
+                });
 
                 series.push({
                     name: metricLabels[metric],
@@ -1252,29 +1308,17 @@
                             const dataIndex = param.dataIndex;
                             const rawVal = series[seriesIndex].rawData[dataIndex];
                             
-                            // Determine type based on metric name in series
-                            const metricName = series[seriesIndex].name;
-                            // Find metric key by name (reverse lookup or check string)
-                            // Easier: check customUnit or infer from series
-                            
+                            const unit = series[seriesIndex].customUnit || '';
                             let formattedVal = '';
-                            if (series[seriesIndex].customUnit === '次' || series[seriesIndex].customUnit === '') {
-                                formattedVal = rawVal.toLocaleString();
+                            
+                            if (unit.includes('bps')) {
+                                formattedVal = formatBps(rawVal);
+                            } else if (unit.includes('B')) {
+                                formattedVal = formatBytes(rawVal);
+                            } else if (unit.includes('千') || unit.includes('万') || unit.includes('亿')) {
+                                formattedVal = formatCount(rawVal);
                             } else {
-                                // Guess type: Bandwidth if unit ends with bps
-                                // Flux if unit ends with B
-                                // But we have customUnit, which is just the global unit.
-                                // Better: Check metric key. But we don't have metric key here easily.
-                                // We can store formatting function type in series.
-                                
-                                const unit = series[seriesIndex].customUnit || '';
-                                if (unit.includes('bps')) {
-                                    formattedVal = formatBps(rawVal);
-                                } else if (unit.includes('B')) {
-                                    formattedVal = formatBytes(rawVal);
-                                } else {
-                                    formattedVal = rawVal.toLocaleString();
-                                }
+                                formattedVal = rawVal.toLocaleString();
                             }
 
                             res += `${param.marker}${param.seriesName}: ${formattedVal}<br/>`;
@@ -1283,7 +1327,7 @@
                     }
                 },
                 legend: { data: metrics.map(m => metricLabels[m]), bottom: 0 },
-                grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
                 xAxis: { type: 'category', boundaryGap: false, data: timeData },
                 yAxis: { type: 'value' },
                 series: series
@@ -1317,7 +1361,7 @@
             const option = {
                 tooltip: { trigger: 'axis', formatter: '{b}<br/>{a}: {c} ms' },
                 legend: { data: metrics.map(m => metricLabels[m]), bottom: 0 },
-                grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+                grid: { left: '3%', right: '4%', bottom: '10%', top: '15%', containLabel: true },
                 xAxis: { type: 'category', boundaryGap: false, data: timeData },
                 yAxis: { type: 'value', name: 'ms' },
                 series: series
@@ -1333,14 +1377,7 @@
             
             let unit = '';
             let divisor = 1;
-            
-            // Determine Label
-            let label = metricLabels[metricName];
-            if (!label) {
-                if (metricName.includes('outFlux')) label = '流量';
-                else if (metricName.includes('request')) label = '请求数';
-                else label = metricName;
-            }
+            let label = metricLabels[metricName] || '';
             
             if (metricName.includes('outFlux')) {
                 const maxVal = sortedData.length > 0 ? sortedData[0].Value : 0;
@@ -1348,14 +1385,18 @@
                 unit = best.unit;
                 divisor = best.divisor;
             } else {
-                unit = '次';
-                divisor = 1;
+                const maxVal = sortedData.length > 0 ? sortedData[0].Value : 0;
+                const best = getBestCountUnit(maxVal);
+                unit = best.unit;
+                divisor = best.divisor;
             }
 
             const yAxisData = sortedData.map(item => mapObject?.[item.Key] || item.Key).reverse();
-            const seriesData = sortedData.map(item => (item.Value / divisor).toFixed(2)).reverse();
+            const seriesData = sortedData.map(item => {
+                const val = item.Value / divisor;
+                return (divisor === 1) ? val : val.toFixed(2);
+            }).reverse();
 
-            // Determine color based on dimension
             let color = '#3b82f6';
             const lowerName = metricName.toLowerCase();
             if (lowerName.includes('country') || lowerName.includes('uadevice')) color = '#3b82f6';
@@ -1374,37 +1415,23 @@
                          let name = param.name;
                          if (name.length > 100) name = name.substring(0, 100) + '...';
                          
-                         // Get raw value
-                         // For Top charts, sortedData is used.
-                         // We need to find the raw value.
-                         // sortedData[index] corresponds to the bar.
-                         // However, the chart is reversed.
-                         // yAxisData and seriesData are reversed sortedData.
-                         // param.dataIndex 0 is the bottom bar (which was the LAST in reversed arrays, so FIRST in sortedData?)
-                         // Let's trace:
-                         // sortedData: [Top1, Top2, ... Top10]
-                         // yAxisData: [Top10, ... Top1] (reversed)
-                         // seriesData: [Top10Value, ... Top1Value] (reversed)
-                         // ECharts category axis default: index 0 is at bottom.
-                         // So dataIndex 0 matches yAxisData[0] -> Top10.
-                         // dataIndex 9 matches yAxisData[9] -> Top1.
-                         
-                         // We can just reverse map or store raw data in series.
-                         // Let's store raw data in series parallel to seriesData.
-                         
                          const rawVal = sortedData[sortedData.length - 1 - param.dataIndex].Value;
                          
                          let formattedVal = '';
                          if (metricName.includes('outFlux')) {
                              formattedVal = formatBytes(rawVal);
                          } else {
-                             formattedVal = rawVal.toLocaleString() + ' ' + unit;
+                             const fVal = formatCount(rawVal);
+                             // Append '次' if not present in unit (formatCount returns unit, but we might want explicit '次')
+                             // formatCount returns "1.23 万". "1.23 万次" sounds good.
+                             // "500" -> "500 次".
+                             formattedVal = fVal + (fVal.includes('千') || fVal.includes('万') || fVal.includes('亿') ? '次' : ' 次');
                          }
                          
                          return `${name}<br/>${param.marker}${label}: ${formattedVal}`;
                     }
                 },
-                grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+                grid: { left: '3%', right: '10%', bottom: '3%', containLabel: true },
                 xAxis: { type: 'value', name: unit },
                 yAxis: { 
                     type: 'category', 
